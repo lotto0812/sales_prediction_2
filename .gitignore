@@ -1,6 +1,8 @@
 # Result files (excluding from repository)
 *.png
 lightgbm_sales_model.txt
+*.joblib
+catboost_info/
 feature_importance.png
 prediction_results.png
 optimization_progress.png
