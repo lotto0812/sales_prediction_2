@@ -9,6 +9,8 @@ import seaborn as sns
 import optuna
 import warnings
 from joblib import dump
+import shap
+
 warnings.filterwarnings('ignore')
 from sklearn.linear_model import Ridge
 from xgboost import XGBRegressor
@@ -61,6 +63,13 @@ feature_columns = [
 ]
 target_column = 'average_target_amount_in_length_of_relationship'
 
+def calculate_mape(y_true, y_pred):
+    """MAPE (Mean Absolute Percentage Error) を計算する"""
+    y_true, y_pred = np.array(y_true), np.array(y_pred)
+    # 0で割るのを防ぐため、y_trueが0のデータは除外
+    non_zero_mask = y_true != 0
+    return np.mean(np.abs((y_true[non_zero_mask] - y_pred[non_zero_mask]) / y_true[non_zero_mask])) * 100
+
 # 標準化する特徴量
 standardize_columns = [
     'AVG_MONTHLY_POPULATION', 'RATING_CNT', 'RATING_SCORE', 
@@ -90,11 +99,16 @@ X_train, X_test, y_train, y_test = train_test_split(
 print(f"訓練データ: {X_train.shape}")
 print(f"テストデータ: {X_test.shape}")
 
+# ハイパーパラメータチューニング用に訓練データをさらに分割
+X_train_opt, X_val_opt, y_train_opt, y_val_opt = train_test_split(
+    X_train, y_train, test_size=0.2, random_state=42
+)
+
 # ハイパーパラメータチューニング
 print(f"\n=== ハイパーパラメータチューニング ===")
 print("Optunaを使用してハイパーパラメータを最適化中...")
 
-def objective(trial):
+def objective(trial, X_train_opt, y_train_opt, X_val_opt, y_val_opt):
     """Optunaの目的関数"""
     params = {
         'objective': 'regression',
@@ -112,11 +126,6 @@ def objective(trial):
         'random_state': 42
     }
     
-    # 訓練・検証データの分割
-    X_train_opt, X_val_opt, y_train_opt, y_val_opt = train_test_split(
-        X_train, y_train, test_size=0.2, random_state=42
-    )
-    
     model = lgb.LGBMRegressor(**params)
     model.fit(X_train_opt, y_train_opt,
               eval_set=[(X_val_opt, y_val_opt)],
@@ -128,21 +137,17 @@ def objective(trial):
     
     return rmse
 
-def objective_ridge(trial):
+def objective_ridge(trial, X_train_opt, y_train_opt, X_val_opt, y_val_opt):
     """Optunaの目的関数 for Ridge"""
     alpha = trial.suggest_float('alpha', 1e-8, 10.0, log=True)
     model = Ridge(alpha=alpha, random_state=42)
-    
-    X_train_opt, X_val_opt, y_train_opt, y_val_opt = train_test_split(
-        X_train, y_train, test_size=0.2, random_state=42
-    )
     
     model.fit(X_train_opt, y_train_opt)
     y_pred = model.predict(X_val_opt)
     rmse = np.sqrt(mean_squared_error(y_val_opt, y_pred))
     return rmse
 
-def objective_xgb(trial):
+def objective_xgb(trial, X_train_opt, y_train_opt, X_val_opt, y_val_opt):
     """Optunaの目的関数 for XGBoost"""
     params = {
         'objective': 'reg:squarederror',
@@ -159,10 +164,6 @@ def objective_xgb(trial):
         'random_state': 42
     }
     
-    X_train_opt, X_val_opt, y_train_opt, y_val_opt = train_test_split(
-        X_train, y_train, test_size=0.2, random_state=42
-    )
-    
     model = XGBRegressor(**params)
     model.fit(X_train_opt, y_train_opt,
               eval_set=[(X_val_opt, y_val_opt)],
@@ -172,7 +173,7 @@ def objective_xgb(trial):
     rmse = np.sqrt(mean_squared_error(y_val_opt, y_pred))
     return rmse
 
-def objective_catboost(trial):
+def objective_catboost(trial, X_train_opt, y_train_opt, X_val_opt, y_val_opt):
     """Optunaの目的関数 for CatBoost"""
     params = {
         'objective': 'RMSE',
@@ -184,10 +185,6 @@ def objective_catboost(trial):
         'verbose': 0,
         'random_state': 42
     }
-    
-    X_train_opt, X_val_opt, y_train_opt, y_val_opt = train_test_split(
-        X_train, y_train, test_size=0.2, random_state=42
-    )
     
     model = CatBoostRegressor(**params)
     model.fit(X_train_opt, y_train_opt,
@@ -202,19 +199,19 @@ def objective_catboost(trial):
 # Optunaでハイパーパラメータ最適化
 print("\n--- LightGBM ---")
 study_lgbm = optuna.create_study(direction='minimize')
-study_lgbm.optimize(objective, n_trials=30)
+study_lgbm.optimize(lambda trial: objective(trial, X_train_opt, y_train_opt, X_val_opt, y_val_opt), n_trials=30)
 
 print("\n--- Ridge ---")
 study_ridge = optuna.create_study(direction='minimize')
-study_ridge.optimize(objective_ridge, n_trials=30)
+study_ridge.optimize(lambda trial: objective_ridge(trial, X_train_opt, y_train_opt, X_val_opt, y_val_opt), n_trials=30)
 
 print("\n--- XGBoost ---")
 study_xgb = optuna.create_study(direction='minimize')
-study_xgb.optimize(objective_xgb, n_trials=30)
+study_xgb.optimize(lambda trial: objective_xgb(trial, X_train_opt, y_train_opt, X_val_opt, y_val_opt), n_trials=30)
 
 print("\n--- CatBoost ---")
 study_catboost = optuna.create_study(direction='minimize')
-study_catboost.optimize(objective_catboost, n_trials=30)
+study_catboost.optimize(lambda trial: objective_catboost(trial, X_train_opt, y_train_opt, X_val_opt, y_val_opt), n_trials=30)
 
 
 print(f"最適化完了!")
@@ -242,10 +239,12 @@ y_pred = final_model.predict(X_test)
 rmse = np.sqrt(mean_squared_error(y_test, y_pred))
 mae = mean_absolute_error(y_test, y_pred)
 r2 = r2_score(y_test, y_pred)
+mape = calculate_mape(y_test, y_pred)
 
 print(f"\n=== 最終モデルの評価結果 ===")
 print(f"RMSE: {rmse:.4f}")
 print(f"MAE: {mae:.4f}")
+print(f"MAPE: {mape:.2f}%")
 print(f"R² Score: {r2:.4f}")
 
 # 他のモデルの訓練と評価
@@ -265,9 +264,11 @@ for name, model in models.items():
     rmse_model = np.sqrt(mean_squared_error(y_test, y_pred_model))
     mae_model = mean_absolute_error(y_test, y_pred_model)
     r2_model = r2_score(y_test, y_pred_model)
+    mape_model = calculate_mape(y_test, y_pred_model)
     
     print(f"RMSE: {rmse_model:.4f}")
     print(f"MAE: {mae_model:.4f}")
+    print(f"MAPE: {mape_model:.2f}%")
     print(f"R² Score: {r2_model:.4f}")
 
 # アンサンブルモデル（スタッキング）
@@ -289,9 +290,11 @@ y_pred_stack = stacking_regressor.predict(X_test)
 rmse_stack = np.sqrt(mean_squared_error(y_test, y_pred_stack))
 mae_stack = mean_absolute_error(y_test, y_pred_stack)
 r2_stack = r2_score(y_test, y_pred_stack)
+mape_stack = calculate_mape(y_test, y_pred_stack)
 
 print(f"RMSE: {rmse_stack:.4f}")
 print(f"MAE: {mae_stack:.4f}")
+print(f"MAPE: {mape_stack:.2f}%")
 print(f"R² Score: {r2_stack:.4f}")
 
 # 特徴量重要度の可視化
@@ -306,7 +309,7 @@ lgbm_importance_df = pd.DataFrame({
 
 plt.figure(figsize=(10, 8))
 sns.barplot(data=lgbm_importance_df, x='importance', y='feature')
-plt.title('LightGBM 特徴量重要度')
+plt.title('LightGBM Feature Importance')
 plt.tight_layout()
 plt.savefig('feature_importance_lgbm.png', dpi=300, bbox_inches='tight')
 plt.show()
@@ -321,7 +324,7 @@ xgb_importance_df = pd.DataFrame({
 
 plt.figure(figsize=(10, 8))
 sns.barplot(data=xgb_importance_df, x='importance', y='feature')
-plt.title('XGBoost 特徴量重要度')
+plt.title('XGBoost Feature Importance')
 plt.tight_layout()
 plt.savefig('feature_importance_xgb.png', dpi=300, bbox_inches='tight')
 plt.show()
@@ -336,7 +339,7 @@ cat_importance_df = pd.DataFrame({
 
 plt.figure(figsize=(10, 8))
 sns.barplot(data=cat_importance_df, x='importance', y='feature')
-plt.title('CatBoost 特徴量重要度')
+plt.title('CatBoost Feature Importance')
 plt.tight_layout()
 plt.savefig('feature_importance_cat.png', dpi=300, bbox_inches='tight')
 plt.show()
@@ -349,22 +352,41 @@ plt.figure(figsize=(12, 5))
 plt.subplot(1, 2, 1)
 plt.scatter(y_test, y_pred_stack, alpha=0.5)
 plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--', lw=2)
-plt.xlabel('実際値')
-plt.ylabel('予測値')
-plt.title('予測値 vs 実際値 (スタッキング)')
+plt.xlabel('Actual Values')
+plt.ylabel('Predicted Values')
+plt.title('Predicted vs Actual (Stacking)')
 
 # 残差プロット
 plt.subplot(1, 2, 2)
 residuals_stack = y_test - y_pred_stack
 plt.scatter(y_pred_stack, residuals_stack, alpha=0.5)
 plt.axhline(y=0, color='r', linestyle='--')
-plt.xlabel('予測値')
-plt.ylabel('残差')
-plt.title('残差プロット (スタッキング)')
+plt.xlabel('Predicted Values')
+plt.ylabel('Residuals')
+plt.title('Residual Plot (Stacking)')
 
 plt.tight_layout()
 plt.savefig('prediction_results_stacking.png', dpi=300, bbox_inches='tight')
 plt.show()
+
+# SHAPの計算と可視化 (XGBoostモデルに対して)
+print(f"\n=== SHAP値の計算と可視化 (XGBoost) ===")
+explainer = shap.TreeExplainer(models['XGBoost'])
+shap_values = explainer.shap_values(X_test)
+
+# SHAPサマリープロット
+shap.summary_plot(shap_values, X_test, plot_type="bar", show=False)
+plt.title('SHAP Feature Importance (XGBoost)')
+plt.tight_layout()
+plt.savefig('shap_summary_bar.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+shap.summary_plot(shap_values, X_test, show=False)
+plt.title('SHAP Summary Plot (XGBoost)')
+plt.tight_layout()
+plt.savefig('shap_summary_dot.png', dpi=300, bbox_inches='tight')
+plt.show()
+
 
 # モデルの保存
 print(f"\n=== モデルの保存 ===")
@@ -382,9 +404,9 @@ plt.plot([trial.value for trial in study_ridge.trials], label='Ridge')
 plt.plot([trial.value for trial in study_xgb.trials], label='XGBoost')
 plt.plot([trial.value for trial in study_catboost.trials], label='CatBoost')
 
-plt.xlabel('試行回数')
+plt.xlabel('Trial')
 plt.ylabel('RMSE')
-plt.title('ハイパーパラメータ最適化の進行')
+plt.title('Hyperparameter Optimization Progress')
 plt.legend()
 plt.grid(True)
 plt.savefig('optimization_progress.png', dpi=300, bbox_inches='tight')
@@ -399,4 +421,6 @@ print("- feature_importance_lgbm.png: LGBM特徴量重要度")
 print("- feature_importance_xgb.png: XGBoost特徴量重要度")
 print("- feature_importance_cat.png: CatBoost特徴量重要度")
 print("- prediction_results_stacking.png: スタッキングモデルの予測結果")
-print("- optimization_progress.png: 最適化の進行") 
+print("- optimization_progress.png: 最適化の進行")
+print("- shap_summary_bar.png: SHAP重要度プロット")
+print("- shap_summary_dot.png: SHAPサマリープロット") 
