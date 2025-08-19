@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ファットテール分布対応アンサンブル予測フロー</title>
+    <style>
+        @media print {
+            body { margin: 0; }
+            .container { width: 100%; max-width: none; }
+        }
+        
+        body {
+            font-family: "游明朝", "Yu Mincho", "MS Mincho", serif;
+            line-height: 1.8;
+            color: #333;
+            background: white;
+            margin: 0;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 210mm;
+            margin: 0 auto;
+            padding: 25mm 25mm;
+            background: white;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        
+        h1 {
+            font-size: 18pt;
+            font-weight: bold;
+            text-align: center;
+            margin-bottom: 30px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #333;
+        }
+        
+        h2 {
+            font-size: 14pt;
+            font-weight: bold;
+            margin-top: 25px;
+            margin-bottom: 15px;
+            color: #1a1a1a;
+        }
+        
+        h3 {
+            font-size: 12pt;
+            font-weight: bold;
+            margin-top: 20px;
+            margin-bottom: 10px;
+            color: #333;
+        }
+        
+        p {
+            font-size: 10.5pt;
+            text-indent: 1em;
+            margin-bottom: 12px;
+            text-align: justify;
+        }
+        
+        ol, ul {
+            margin-left: 2em;
+            margin-bottom: 15px;
+        }
+        
+        li {
+            font-size: 10.5pt;
+            margin-bottom: 8px;
+        }
+        
+        .model-list {
+            background: #f8f8f8;
+            padding: 15px;
+            border-left: 4px solid #4a90e2;
+            margin: 15px 0;
+        }
+        
+        .formula {
+            background: #f0f0f0;
+            padding: 10px;
+            margin: 15px 0;
+            font-family: "Courier New", monospace;
+            text-align: center;
+            border: 1px solid #ddd;
+        }
+        
+        .effect-box {
+            background: #f9f9f9;
+            border: 1px solid #ddd;
+            padding: 15px;
+            margin: 15px 0;
+        }
+        
+        .download-btn {
+            display: inline-block;
+            margin: 20px auto;
+            padding: 10px 20px;
+            background: #4a90e2;
+            color: white;
+            text-decoration: none;
+            border-radius: 5px;
+            text-align: center;
+            cursor: pointer;
+        }
+        
+        .download-btn:hover {
+            background: #357abd;
+        }
+        
+        @media screen {
+            .no-print {
+                text-align: center;
+                margin: 20px 0;
+                padding: 15px;
+                background: #e8f4f8;
+                border: 1px solid #b8d4e3;
+            }
+        }
+        
+        @media print {
+            .no-print {
+                display: none;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="no-print">
+        <p><strong>💡 ヒント:</strong> このページを印刷またはPDFとして保存し、WordやGoogle Docsで開くことができます。<br>
+        ブラウザの印刷機能（Ctrl+P / Cmd+P）を使用してください。</p>
+    </div>
+    
+    <div class="container">
+        <h1>ファットテール分布対応アンサンブル予測フロー</h1>
+        
+        <h2>全体構成</h2>
+        <p>本アンサンブルは、2段階のスタッキング構造と最終的なブレンディングによる3層構成とします。</p>
+        
+        <h3>第1層：ベースモデル群</h3>
+        <p>4つの異なる特性を持つモデルで多様性を確保：</p>
+        
+        <div class="model-list">
+            <ol>
+                <li><strong>LightGBM</strong> - 標準的なGBDT。高速で汎用的な予測</li>
+                <li><strong>Ridge回帰</strong> - 線形モデル。安定した基準値を提供</li>
+                <li><strong>TweedieGLM</strong> - ファットテール分布に特化。高売上領域の表現力</li>
+                <li><strong>CatBoost</strong> - カテゴリ変数に強く、過学習に頑健</li>
+            </ol>
+        </div>
+        
+        <h3>第2層：メタ学習器（スタッキング）</h3>
+        <p>ベースモデルの予測値を入力として、2つのロバストな回帰手法を適用：</p>
+        
+        <ul>
+            <li><strong>Quantile回帰（α=0.7）</strong> - 中央値より上側の予測に重点</li>
+            <li><strong>Quantile回帰（α=0.9）</strong> - 高売上領域の予測を重視</li>
+            <li><strong>Huber回帰</strong> - 外れ値に対してロバストな予測</li>
+        </ul>
+        
+        <p>各モデルはK-fold交差検証（K=5）でOut-of-Fold予測を生成し、過学習を防ぎます。</p>
+        
+        <h3>第3層：最終ブレンディング</h3>
+        <p>メタ学習器の出力を重み付き平均で統合：</p>
+        
+        <div class="formula">
+            最終予測 = 0.3 × Q(0.7) + 0.5 × Q(0.9) + 0.2 × Huber
+        </div>
+        
+        <p>高分位点の予測により大きな重みを置くことで、100-200の高売上領域を適切に表現。</p>
+        
+        <h2>期待効果</h2>
+        
+        <div class="effect-box">
+            <h3>1. 分布の裾野の改善</h3>
+            <p>TweedieGLMとQuantile(α=0.9)の組み合わせにより、従来モデルで表現できなかった100-200領域の予測精度が向上。単一モデルでの正規分布的な予測から、実データに近いファットテール分布への改善が期待できます。</p>
+        </div>
+        
+        <div class="effect-box">
+            <h3>2. 予測の安定性向上</h3>
+            <p>Ridge回帰による安定した基準値と、Huber回帰によるロバスト性により、外れ値や異常値に対する耐性が向上。特に新規店舗のような未知データに対する汎化性能の改善が見込まれます。</p>
+        </div>
+        
+        <div class="effect-box">
+            <h3>3. 多様性による精度向上</h3>
+            <p>線形モデル（Ridge）、ツリー系（LightGBM、CatBoost）、分布特化型（Tweedie）という異なるアプローチの組み合わせにより、各モデルの弱点を相互補完。全体として15-25%のRMSE改善が期待できます。</p>
+        </div>
+        
+        <div class="effect-box">
+            <h3>4. 高売上店舗の予測改善</h3>
+            <p>Quantile回帰による上側分位点の直接的な学習により、従来の平均値予測では捉えきれなかった高売上パターンの学習が可能。売上150以上の店舗に対する予測誤差を30-40%削減する効果が期待されます。</p>
+        </div>
+    </div>
+</body>
+</html>
