@@ -12,6 +12,7 @@ from joblib import dump
 import shap
 import torch
 from pytorch_tabnet.tab_model import TabNetRegressor
+from sklearn.cluster import KMeans
 
 warnings.filterwarnings('ignore')
 from sklearn.linear_model import Ridge
@@ -57,12 +58,57 @@ df = pd.DataFrame(data)
 print(f"データフレーム作成完了: {df.shape}")
 print(f"目標変数の統計:\n{df['average_target_amount_in_length_of_relationship'].describe()}")
 
+# 特徴量のクラスタリング
+print("\n=== 特徴量のクラスタリング ===")
+clustering_features = ['AVG_MONTHLY_POPULATION', 'RATING_CNT', 'RATING_SCORE', 'NUM_SEATS']
+X_for_clustering = df[clustering_features]
+
+# クラスタリング用のデータを標準化
+scaler_clustering = StandardScaler()
+X_scaled_clustering = scaler_clustering.fit_transform(X_for_clustering)
+
+# エルボー法による最適なクラスタ数の探索
+print("\n=== エルボー法による最適なクラスタ数の探索 ===")
+inertia = []
+cluster_range = range(1, 11)
+
+for i in cluster_range:
+    kmeans_elbow = KMeans(n_clusters=i, random_state=42, n_init=10)
+    kmeans_elbow.fit(X_scaled_clustering)
+    inertia.append(kmeans_elbow.inertia_)
+
+# エルボー法のグラフをプロット
+plt.figure(figsize=(10, 6))
+plt.plot(cluster_range, inertia, marker='o', linestyle='--')
+plt.xlabel('Number of clusters')
+plt.ylabel('Inertia')
+plt.title('Elbow Method For Optimal k')
+plt.xticks(cluster_range)
+plt.grid(True)
+plt.savefig('elbow_method.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+# K-meansクラスタリングの実行
+kmeans = KMeans(n_clusters=5, random_state=42, n_init=10)
+df['CLUSTER'] = kmeans.fit_predict(X_scaled_clustering)
+
+print(f"クラスタリング完了。新しい特徴量 'CLUSTER' を追加しました。")
+print(f"各クラスタのサンプル数:\n{df['CLUSTER'].value_counts()}")
+
+# クラスタリング結果の可視化
+print("\n=== クラスタリング結果の可視化 ===")
+sns.pairplot(df, vars=clustering_features, hue='CLUSTER', palette='viridis', plot_kws={'alpha': 0.6})
+plt.suptitle('Clustering Results Pair Plot', y=1.02)
+plt.savefig('clustering_results.png', dpi=300, bbox_inches='tight')
+plt.show()
+
+
 # 特徴量の定義
 feature_columns = [
     'AVG_MONTHLY_POPULATION', 'RATING_CNT', 'RATING_SCORE', 'DINNER_INFO',
-    'LUNCH_INFO', 'HOME_PAGE_URL', 'PHONE_NUM', 'NUM_SEATS', 
+    'LUNCH_INFO', 'HOME_PAGE_URL', 'PHONE_NUM', 'NUM_SEATS',
     'MAX_NUM_PEOPLE_FOR_RESERVATION', 'RESERVATION_POSSIBILITY_INFO',
-    'CITY', 'CUISINE_CAT_1'
+    'CITY', 'CUISINE_CAT_1', 'CLUSTER'
 ]
 target_column = 'average_target_amount_in_length_of_relationship'
 
@@ -75,7 +121,7 @@ def calculate_mape(y_true, y_pred):
 
 # 標準化する特徴量
 standardize_columns = [
-    'AVG_MONTHLY_POPULATION', 'RATING_CNT', 'RATING_SCORE', 
+    'AVG_MONTHLY_POPULATION', 'RATING_CNT', 'RATING_SCORE',
     'NUM_SEATS', 'MAX_NUM_PEOPLE_FOR_RESERVATION'
 ]
 
@@ -129,7 +175,7 @@ def objective(trial, X_train_opt, y_train_opt, X_val_opt, y_val_opt):
         'verbose': -1,
         'random_state': 42
     }
-    
+
     model = lgb.LGBMRegressor(**params)
     model.fit(X_train_opt, y_train_opt,
               eval_set=[(X_val_opt, y_val_opt)],
@@ -138,14 +184,14 @@ def objective(trial, X_train_opt, y_train_opt, X_val_opt, y_val_opt):
 
     y_pred = model.predict(X_val_opt)
     rmse = np.sqrt(mean_squared_error(y_val_opt, y_pred))
-    
+
     return rmse
 
 def objective_ridge(trial, X_train_opt, y_train_opt, X_val_opt, y_val_opt):
     """Optunaの目的関数 for Ridge"""
     alpha = trial.suggest_float('alpha', 1e-8, 10.0, log=True)
     model = Ridge(alpha=alpha, random_state=42)
-    
+
     model.fit(X_train_opt, y_train_opt)
     y_pred = model.predict(X_val_opt)
     rmse = np.sqrt(mean_squared_error(y_val_opt, y_pred))
@@ -167,12 +213,12 @@ def objective_xgb(trial, X_train_opt, y_train_opt, X_val_opt, y_val_opt):
         'reg_lambda': trial.suggest_float('reg_lambda', 1e-8, 1.0, log=True),
         'random_state': 42
     }
-    
+
     model = XGBRegressor(**params)
     model.fit(X_train_opt, y_train_opt,
               eval_set=[(X_val_opt, y_val_opt)],
               verbose=False)
-    
+
     y_pred = model.predict(X_val_opt)
     rmse = np.sqrt(mean_squared_error(y_val_opt, y_pred))
     return rmse
@@ -189,13 +235,13 @@ def objective_catboost(trial, X_train_opt, y_train_opt, X_val_opt, y_val_opt):
         'verbose': 0,
         'random_state': 42
     }
-    
+
     model = CatBoostRegressor(**params)
     model.fit(X_train_opt, y_train_opt,
               eval_set=[(X_val_opt, y_val_opt)],
               early_stopping_rounds=50,
               verbose=False)
-    
+
     y_pred = model.predict(X_val_opt)
     rmse = np.sqrt(mean_squared_error(y_val_opt, y_pred))
     return rmse
@@ -216,9 +262,9 @@ def objective_tabnet(trial, X_train_opt, y_train_opt, X_val_opt, y_val_opt):
         'verbose': 0,
         'seed': 42
     }
-    
+
     model = TabNetRegressor(**params)
-    
+
     # データ型をNumpy配列に変換
     X_train_np = X_train_opt.values
     y_train_np = y_train_opt.values.reshape(-1, 1)
@@ -236,10 +282,10 @@ def objective_tabnet(trial, X_train_opt, y_train_opt, X_val_opt, y_val_opt):
         num_workers=0,
         drop_last=False,
     )
-    
+
     y_pred = model.predict(X_val_np)
     rmse = np.sqrt(mean_squared_error(y_val_np, y_pred))
-    
+
     return rmse
 
 def objective_tweedie(trial, X_train_opt, y_train_opt, X_val_opt, y_val_opt):
@@ -249,13 +295,13 @@ def objective_tweedie(trial, X_train_opt, y_train_opt, X_val_opt, y_val_opt):
         'alpha': trial.suggest_float('alpha', 1e-8, 10.0, log=True), # L2 regularization
         'link': 'log'
     }
-    
+
     model = TweedieRegressor(**params)
-    
+
     # y_train_optが0以下の値を含んでいると学習できないため、正の値にクリップする
     # Tweedie分布は正の値のみを扱うため
     y_train_opt_clipped = np.maximum(y_train_opt, 1e-8)
-    
+
     model.fit(X_train_opt, y_train_opt_clipped)
     y_pred = model.predict(X_val_opt)
     rmse = np.sqrt(mean_squared_error(y_val_opt, y_pred))
@@ -301,9 +347,9 @@ results = {}
 
 # LightGBM (final_modelとして別途訓練)
 print("\n--- LightGBM ---")
-final_model = lgb.LGBMRegressor(**study_lgbm.best_params, 
-                                objective='quantile', 
-                                alpha=0.8, 
+final_model = lgb.LGBMRegressor(**study_lgbm.best_params,
+                                objective='quantile',
+                                alpha=0.8,
                                 random_state=42)
 final_model.fit(X_train, y_train,
                 eval_set=[(X_test, y_test)],
@@ -327,7 +373,7 @@ for name, model in models.items():
     print(f"\n--- {name} ---")
     model.fit(X_train, y_train)
     y_pred_model = model.predict(X_test)
-    
+
     rmse_model = np.sqrt(mean_squared_error(y_test, y_pred_model))
     mae_model = mean_absolute_error(y_test, y_pred_model)
     r2_model = r2_score(y_test, y_pred_model)
@@ -359,14 +405,14 @@ print(f"RMSE: {rmse_tweedie:.4f}, MAE: {mae_tweedie:.4f}, MAPE: {mape_tweedie:.2
 # best_params_tabnet['scheduler_params'] = {"mode": "min", "patience": 10, "min_lr": 1e-5, "factor": 0.5}
 # best_params_tabnet['seed'] = 42
 # best_params_tabnet['verbose'] = 0
-# 
+#
 # tabnet_model = TabNetRegressor(**best_params_tabnet)
-# 
+#
 # X_train_np = X_train.values
 # y_train_np = y_train.values.reshape(-1, 1)
 # X_test_np = X_test.values
 # y_test_np = y_test.values.reshape(-1, 1)
-# 
+#
 # tabnet_model.fit(
 #     X_train=X_train_np, y_train=y_train_np,
 #     eval_set=[(X_test_np, y_test_np)],
@@ -435,7 +481,7 @@ for name, model in all_models_for_importance.items():
         'feature': feature_columns,
         'importance': importance
     }).sort_values('importance', ascending=False)
-    
+
     plt.figure(figsize=(10, 6))
     sns.barplot(data=importance_df, x='importance', y='feature')
     plt.title(f'{name} Feature Importance')
