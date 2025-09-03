@@ -12,7 +12,16 @@ from joblib import dump
 import shap
 import torch
 from pytorch_tabnet.tab_model import TabNetRegressor
-from sklearn.cluster import KMeans
+from sklearn.cluster import KMeans, DBSCAN
+from sklearn.mixture import GaussianMixture
+import hdbscan # HDBSCANのインストールが必要な場合があります: pip install hdbscan
+import argparse
+import sys
+from sklearn.metrics import silhouette_score, calinski_harabasz_score, davies_bouldin_score
+from sklearn.cluster import DBSCAN, AgglomerativeClustering, MeanShift, Birch
+from sklearn.cluster import estimate_bandwidth
+from tqdm import tqdm
+
 
 warnings.filterwarnings('ignore')
 from sklearn.linear_model import Ridge
@@ -20,6 +29,14 @@ from xgboost import XGBRegressor
 from catboost import CatBoostRegressor
 from sklearn.ensemble import StackingRegressor
 from sklearn.linear_model import TweedieRegressor
+
+# コマンドライン引数の設定
+parser = argparse.ArgumentParser(description='Sales Prediction with Clustering')
+parser.add_argument('--clustering_method', type=str, default='kmeans',
+                    choices=['kmeans', 'dbscan', 'hdbscan', 'gaussian_mixture'],
+                    help='Clustering method to use (kmeans, dbscan, hdbscan, gaussian_mixture)')
+args = parser.parse_args()
+print(f"使用するクラスタリング手法: {args.clustering_method}")
 
 # データの準備（実際の使用時はすでにロードされたデータフレームを使用）
 print("=== サンプルデータの作成 ===")
@@ -67,49 +84,260 @@ X_for_clustering = df[clustering_features]
 scaler_clustering = StandardScaler()
 X_scaled_clustering = scaler_clustering.fit_transform(X_for_clustering)
 
-# エルボー法による最適なクラスタ数の探索
-print("\n=== エルボー法による最適なクラスタ数の探索 ===")
-inertia = []
-cluster_range = range(1, 11)
+# === クラスタリングのハイパーパラメータチューニング ===
+print("\n=== クラスタリングのハイパーパラメータチューニング ===")
 
-for i in cluster_range:
-    kmeans_elbow = KMeans(n_clusters=i, random_state=42, n_init=10)
-    kmeans_elbow.fit(X_scaled_clustering)
-    inertia.append(kmeans_elbow.inertia_)
+def objective_kmeans(trial, data):
+    n_clusters = trial.suggest_int('n_clusters', 2, 10)
+    model = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    labels = model.fit_predict(data)
+    if len(np.unique(labels)) < 2:
+        return -1.0
+    return silhouette_score(data, labels)
 
-# エルボー法のグラフをプロット
-plt.figure(figsize=(10, 6))
-plt.plot(cluster_range, inertia, marker='o', linestyle='--')
-plt.xlabel('Number of clusters')
-plt.ylabel('Inertia')
-plt.title('Elbow Method For Optimal k')
-plt.xticks(cluster_range)
-plt.grid(True)
-plt.savefig('elbow_method.png', dpi=300, bbox_inches='tight')
-plt.show()
+def objective_dbscan(trial, data):
+    eps = trial.suggest_float('eps', 0.1, 2.0)
+    min_samples = trial.suggest_int('min_samples', 2, 20)
+    model = DBSCAN(eps=eps, min_samples=min_samples)
+    labels = model.fit_predict(data)
+    # クラスタ数が1以下（すべてノイズなど）の場合はスコアを-1とする
+    unique_labels = np.unique(labels)
+    if len(unique_labels) < 2:
+        return -1.0
+    # ノイズポイントを除外して評価
+    if -1 in unique_labels:
+        filtered_indices = labels != -1
+        # ノイズ除去後にクラスタが1つ以下になる場合
+        if len(np.unique(labels[filtered_indices])) < 2:
+            return -1.0
+        return silhouette_score(data[filtered_indices], labels[filtered_indices])
+    return silhouette_score(data, labels)
 
-# K-meansクラスタリングの実行
-kmeans = KMeans(n_clusters=5, random_state=42, n_init=10)
-df['CLUSTER'] = kmeans.fit_predict(X_scaled_clustering)
+def objective_hdbscan(trial, data):
+    min_cluster_size = trial.suggest_int('min_cluster_size', 5, 200)
+    min_samples = trial.suggest_int('min_samples', 1, 20)
+    cluster_selection_epsilon = trial.suggest_float('cluster_selection_epsilon', 0.0, 1.0)
+    model = hdbscan.HDBSCAN(min_cluster_size=min_cluster_size, min_samples=min_samples, cluster_selection_epsilon=cluster_selection_epsilon, gen_min_span_tree=False)
+    labels = model.fit_predict(data)
+    unique_labels = np.unique(labels)
+    if len(unique_labels) < 2:
+        return -1.0
+    if -1 in unique_labels:
+        filtered_indices = labels != -1
+        if len(np.unique(labels[filtered_indices])) < 2:
+            return -1.0
+        return silhouette_score(data[filtered_indices], labels[filtered_indices])
+    return silhouette_score(data, labels)
 
-print(f"クラスタリング完了。新しい特徴量 'CLUSTER' を追加しました。")
-print(f"各クラスタのサンプル数:\n{df['CLUSTER'].value_counts()}")
+def objective_gaussian_mixture(trial, data):
+    n_components = trial.suggest_int('n_components', 2, 10)
+    covariance_type = trial.suggest_categorical('covariance_type', ['full', 'tied', 'diag', 'spherical'])
+    model = GaussianMixture(n_components=n_components, covariance_type=covariance_type, random_state=42)
+    labels = model.fit_predict(data)
+    if len(np.unique(labels)) < 2:
+        return -1.0
+    return silhouette_score(data, labels)
 
-# クラスタリング結果の可視化
-print("\n=== クラスタリング結果の可視化 ===")
-sns.pairplot(df, vars=clustering_features, hue='CLUSTER', palette='viridis', plot_kws={'alpha': 0.6})
-plt.suptitle('Clustering Results Pair Plot', y=1.02)
-plt.savefig('clustering_results.png', dpi=300, bbox_inches='tight')
-plt.show()
+def objective_agglomerative(trial, data):
+    n_clusters = trial.suggest_int('n_clusters', 2, 10)
+    linkage = trial.suggest_categorical('linkage', ['ward', 'complete', 'average', 'single'])
+    model = AgglomerativeClustering(n_clusters=n_clusters, linkage=linkage)
+    labels = model.fit_predict(data)
+    if len(np.unique(labels)) < 2:
+        return -1.0
+    return silhouette_score(data, labels)
+
+def objective_birch(trial, data):
+    n_clusters = trial.suggest_int('n_clusters', 2, 10)
+    threshold = trial.suggest_float('threshold', 0.1, 1.0)
+    branching_factor = trial.suggest_int('branching_factor', 20, 100)
+    model = Birch(n_clusters=n_clusters, threshold=threshold, branching_factor=branching_factor)
+    labels = model.fit_predict(data)
+    if len(np.unique(labels)) < 2:
+        return -1.0
+    return silhouette_score(data, labels)
+
+def objective_meanshift(trial, data):
+    bandwidth_estimate = estimate_bandwidth(data, quantile=0.2, n_samples=500)
+    bandwidth = trial.suggest_float('bandwidth', bandwidth_estimate * 0.5, bandwidth_estimate * 1.5)
+    model = MeanShift(bandwidth=bandwidth)
+    labels = model.fit_predict(data)
+    if len(np.unique(labels)) < 2:
+        return -1.0
+    return silhouette_score(data, labels)
+
+
+# チューニングの実行とアルゴリズムのインスタンス化
+print("\n=== チューニングされたパラメータでクラスタリングモデルを準備 ===")
+tuned_clustering_algorithms = {}
+n_trials = 10 # チューニングの試行回数を10に減らす
+
+def run_study(objective_func, data, n_trials):
+    study = optuna.create_study(direction='maximize')
+    for _ in tqdm(range(n_trials), desc=f"Tuning {objective_func.__name__}"):
+        study.optimize(lambda trial: objective_func(trial, data), n_trials=1)
+    return study
+
+# KMeans
+study_kmeans = run_study(objective_kmeans, X_scaled_clustering, n_trials)
+best_params_kmeans = study_kmeans.best_params
+tuned_clustering_algorithms['KMeans'] = KMeans(**best_params_kmeans, random_state=42, n_init=10)
+print(f"  Best params: {best_params_kmeans}, Silhouette: {study_kmeans.best_value:.4f}")
+
+# DBSCAN
+study_dbscan = run_study(objective_dbscan, X_scaled_clustering, n_trials)
+best_params_dbscan = study_dbscan.best_params
+tuned_clustering_algorithms['DBSCAN'] = DBSCAN(**best_params_dbscan)
+print(f"  Best params: {best_params_dbscan}, Silhouette: {study_dbscan.best_value:.4f}")
+
+# HDBSCAN
+study_hdbscan = run_study(objective_hdbscan, X_scaled_clustering, n_trials)
+best_params_hdbscan = study_hdbscan.best_params
+tuned_clustering_algorithms['HDBSCAN'] = hdbscan.HDBSCAN(**best_params_hdbscan, gen_min_span_tree=True)
+print(f"  Best params: {best_params_hdbscan}, Silhouette: {study_hdbscan.best_value:.4f}")
+
+# GaussianMixture
+study_gm = run_study(objective_gaussian_mixture, X_scaled_clustering, n_trials)
+best_params_gm = study_gm.best_params
+tuned_clustering_algorithms['GaussianMixture'] = GaussianMixture(**best_params_gm, random_state=42)
+print(f"  Best params: {best_params_gm}, Silhouette: {study_gm.best_value:.4f}")
+
+# AgglomerativeClustering
+study_agg = run_study(objective_agglomerative, X_scaled_clustering, n_trials)
+best_params_agg = study_agg.best_params
+tuned_clustering_algorithms['AgglomerativeClustering'] = AgglomerativeClustering(**best_params_agg)
+print(f"  Best params: {best_params_agg}, Silhouette: {study_agg.best_value:.4f}")
+
+# MeanShift
+study_ms = run_study(objective_meanshift, X_scaled_clustering, n_trials)
+best_params_ms = study_ms.best_params
+tuned_clustering_algorithms['MeanShift'] = MeanShift(**best_params_ms)
+print(f"  Best params: {best_params_ms}, Silhouette: {study_ms.best_value:.4f}")
+
+# Birch
+study_birch = run_study(objective_birch, X_scaled_clustering, n_trials)
+best_params_birch = study_birch.best_params
+tuned_clustering_algorithms['Birch'] = Birch(**best_params_birch)
+print(f"  Best params: {best_params_birch}, Silhouette: {study_birch.best_value:.4f}")
+
+
+evaluation_results = {}
+print("\n=== 全てのクラスタリングアルゴリズムを実行し、特徴量として追加 ===")
+for name, algorithm in tqdm(tuned_clustering_algorithms.items(), desc="クラスタリング実行と評価"):
+    column_name = f'cluster_{name.lower()}'
+    print(f"\n--- クラスタリング手法: {name} (カラム名: {column_name}) ---")
+    
+    # クラスタリングの実行とカラム追加
+    labels = algorithm.fit_predict(X_scaled_clustering)
+    df[column_name] = labels
+    
+    # ノイズポイント（-1）を除外して評価
+    if -1 in np.unique(labels):
+        filtered_indices = labels != -1
+        X_eval = X_scaled_clustering[filtered_indices]
+        labels_eval = labels[filtered_indices]
+    else:
+        X_eval = X_scaled_clustering
+        labels_eval = labels
+
+    # クラスタ数が2以上の場合のみ評価指標を計算
+    if len(np.unique(labels_eval)) > 1:
+        silhouette = silhouette_score(X_eval, labels_eval)
+        calinski = calinski_harabasz_score(X_eval, labels_eval)
+        davies = davies_bouldin_score(X_eval, labels_eval)
+        evaluation_results[name] = {
+            'Silhouette Score': silhouette,
+            'Calinski-Harabasz Score': calinski,
+            'Davies-Bouldin Score': davies
+        }
+        print(f"  シルエットスコア: {silhouette:.4f}")
+        print(f"  Calinski-Harabaszスコア: {calinski:.4f}")
+        print(f"  Davies-Bouldinスコア: {davies:.4f}")
+    else:
+        print("  クラスタ数が1のため評価指標は計算しません。")
+        evaluation_results[name] = {
+            'Silhouette Score': 'N/A',
+            'Calinski-Harabasz Score': 'N/A',
+            'Davies-Bouldin Score': 'N/A'
+        }
+    
+    print(f"  各クラスタのサンプル数:\n{df[column_name].value_counts().sort_index()}")
+    
+    # クラスタリング結果の可視化
+    sns.pairplot(df, vars=clustering_features, hue=column_name, palette='viridis', plot_kws={'alpha': 0.6})
+    plt.suptitle(f'Clustering Results Pair Plot ({name})', y=1.02)
+    plt.savefig(f'clustering_results_{name}.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+
+# 評価結果のサマリー
+print("\n=== 全クラスタリング手法の評価結果サマリー ===")
+evaluation_df = pd.DataFrame(evaluation_results).T
+print(evaluation_df)
+
+# print("\nクラスタリング評価が完了しました。ここで処理を終了します。")
+# sys.exit()
+
+# === クラスター別の目的変数ヒストグラムの作成 ===
+print("\n=== クラスター別の目的変数ヒストグラムの作成 ===")
+target_column_hist = 'average_target_amount_in_length_of_relationship'
+cluster_columns_for_hist = [col for col in df.columns if col.startswith('cluster_')]
+
+for col_name in cluster_columns_for_hist:
+    print(f"--- {col_name} のヒストグラムを作成中 ---")
+    
+    # ノイズポイント(-1)を除外したデータフレームを作成
+    plot_df = df[df[col_name] != -1].copy()
+    
+    if plot_df.empty or plot_df[col_name].nunique() == 0:
+        print(f"  {col_name} には有効なクラスターがありません。スキップします。")
+        continue
+
+    plt.figure(figsize=(12, 8))
+    
+    # 各クラスターのヒストグラムを重ねて描画
+    clusters = sorted(plot_df[col_name].unique())
+    # 凡例が多すぎると見づらくなるため、20個までに制限
+    if len(clusters) > 20:
+        print(f"  警告: {col_name} のクラスター数が多すぎるため ({len(clusters)}個)、凡例は表示しません。")
+        legend = False
+    else:
+        legend = True
+
+    palette = sns.color_palette("viridis", n_colors=len(clusters))
+    
+    for i, cluster_id in enumerate(clusters):
+        cluster_data = plot_df[plot_df[col_name] == cluster_id]
+        sns.histplot(cluster_data[target_column_hist], kde=True, label=f'Cluster {cluster_id}' if legend else None, alpha=0.6, color=palette[i])
+        
+    plt.title(f'Distribution of Target Amount by Cluster ({col_name})')
+    plt.xlabel('Target Amount')
+    plt.ylabel('Frequency')
+    if legend:
+        plt.legend()
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    plt.tight_layout()
+    plt.savefig(f'histogram_target_by_cluster_{col_name}.png', dpi=300, bbox_inches='tight')
+    plt.show()
+
+print("\nヒストグラムの作成が完了しました。")
 
 
 # 特徴量の定義
+# One-hot encode cluster columns
+cluster_cols = [c for c in df.columns if c.startswith('cluster_')]
+df = pd.get_dummies(df, columns=cluster_cols, prefix=cluster_cols, dtype=float)
+
+# Adjust feature columns for regression
 feature_columns = [
     'AVG_MONTHLY_POPULATION', 'RATING_CNT', 'RATING_SCORE', 'DINNER_INFO',
     'LUNCH_INFO', 'HOME_PAGE_URL', 'PHONE_NUM', 'NUM_SEATS',
     'MAX_NUM_PEOPLE_FOR_RESERVATION', 'RESERVATION_POSSIBILITY_INFO',
-    'CITY', 'CUISINE_CAT_1', 'CLUSTER'
+    'CITY', 'CUISINE_CAT_1'
 ]
+dummy_cols = [c for c in df.columns if c.startswith('cluster_')]
+feature_columns.extend(dummy_cols)
+
 target_column = 'average_target_amount_in_length_of_relationship'
 
 def calculate_mape(y_true, y_pred):
