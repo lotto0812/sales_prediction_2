@@ -1,0 +1,182 @@
+# ================================
+# アンサンブル基盤：OOF生成 → Blending → Stacking
+# ================================
+import numpy as np
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+from sklearn.model_selection import KFold, GroupKFold
+from sklearn.linear_model import Ridge, HuberRegressor
+from sklearn.metrics import mean_absolute_error
+from sklearn.utils.validation import check_random_state
+from scipy.optimize import minimize
+
+# 例：ベースモデル（必要に応じて入れ替え）
+from lightgbm import LGBMRegressor
+from sklearn.linear_model import TweedieRegressor
+try:
+    from catboost import CatBoostRegressor
+    _HAS_CAT = True
+except Exception:
+    _HAS_CAT = False
+
+# ---- Pinball（Quantile）損失 ----
+def pinball_loss(y_true: np.ndarray, y_pred: np.ndarray, alpha: float = 0.85) -> float:
+    diff = y_true - y_pred
+    return np.mean(np.maximum(alpha * diff, (alpha - 1) * diff))
+
+# ---- OOF予測を作る（GroupKFold対応） ----
+@dataclass
+class OOFResult:
+    oof_matrix: np.ndarray          # shape = (n_samples, n_models)
+    test_matrix: np.ndarray         # shape = (n_test, n_models)
+    models_per_fold: Dict[str, List]  # 学習済みモデル（モデル名→fold別リスト）
+    model_names: List[str]
+    folds: List[Tuple[np.ndarray, np.ndarray]]  # (train_idx, valid_idx)
+
+def make_oof_predictions(
+    base_models: Dict[str, object],
+    X: np.ndarray,
+    y: np.ndarray,
+    X_test: np.ndarray,
+    n_splits: int = 5,
+    groups: Optional[np.ndarray] = None,
+    random_state: int = 42
+) -> OOFResult:
+    n, m = X.shape[0], len(base_models)
+    oof = np.zeros((n, m), dtype=float)
+    test_preds = np.zeros((X_test.shape[0], m), dtype=float)
+    models_per_fold = {name: [] for name in base_models.keys()}
+    model_names = list(base_models.keys())
+
+    splitter = GroupKFold(n_splits) if groups is not None else KFold(n_splits, shuffle=True, random_state=random_state)
+    folds = []
+
+    for fold, (tr_idx, va_idx) in enumerate(splitter.split(X, y, groups)):
+        folds.append((tr_idx, va_idx))
+        X_tr, y_tr = X[tr_idx], y[tr_idx]
+        X_va, y_va = X[va_idx], y[va_idx]
+
+        for j, name in enumerate(model_names):
+            # モデルをクローンして学習
+            model = base_models[name]
+            # 一部のモデルはrandom_stateを受けるので固定（任意）
+            if hasattr(model, "random_state"):
+                setattr(model, "random_state", random_state + fold)
+
+            mdl = _fit_model(name, model, X_tr, y_tr, X_va, y_va)
+            models_per_fold[name].append(mdl)
+
+            oof[va_idx, j] = mdl.predict(X_va)
+            test_preds[:, j] += mdl.predict(X_test) / n_splits
+
+    return OOFResult(oof, test_preds, models_per_fold, model_names, folds)
+
+def _fit_model(name, model, X_tr, y_tr, X_va, y_va):
+    """モデル名に応じてeval設定など微調整（必要に応じて拡張）"""
+    if isinstance(model, LGBMRegressor):
+        model = LGBMRegressor(**model.get_params())
+        model.fit(X_tr, y_tr,
+                  eval_set=[(X_va, y_va)],
+                  eval_metric="mae",
+                  verbose=False)
+        return model
+    if _HAS_CAT and isinstance(model, CatBoostRegressor):
+        model = CatBoostRegressor(**model.get_params())
+        model.fit(X_tr, y_tr, eval_set=(X_va, y_va), verbose=False)
+        return model
+    # 線形系/GLMなどスキル枠
+    mdl = model.__class__(**model.get_params())
+    mdl.fit(X_tr, y_tr)
+    return mdl
+
+# ---- Blending：重み最適化（w>=0, sum w=1, 目的=Pinball Loss α） ----
+def optimize_blend_weights(
+    y_true: np.ndarray,
+    oof_matrix: np.ndarray,
+    alpha: float = 0.85
+) -> np.ndarray:
+    k = oof_matrix.shape[1]
+    x0 = np.ones(k) / k  # 初期値：等重み
+    bounds = [(0.0, 1.0)] * k
+    cons = {"type": "eq", "fun": lambda w: np.sum(w) - 1.0}
+
+    def objective(w):
+        pred = oof_matrix @ w
+        return pinball_loss(y_true, pred, alpha=alpha)
+
+    res = minimize(objective, x0, method="SLSQP", bounds=bounds, constraints=cons)
+    if not res.success:
+        # 失敗時は等重みにフォールバック
+        return x0
+    return res.x
+
+# ---- Stacking：メタ学習器（Quantile/LAD/Huber） ----
+# Option A) LightGBMでQuantile回帰（推奨：高αで上側重視）
+def fit_meta_quantile_lgbm(X_meta_train, y, X_meta_test, alpha: float = 0.85):
+    meta = LGBMRegressor(objective="quantile", alpha=alpha,
+                         learning_rate=0.05, n_estimators=2000,
+                         num_leaves=63, min_data_in_leaf=10,
+                         feature_fraction=0.9, bagging_fraction=0.9, bagging_freq=1,
+                         random_state=42)
+    meta.fit(X_meta_train, y, eval_set=[(X_meta_train, y)], eval_metric="quantile", verbose=False)
+    return meta, meta.predict(X_meta_test)
+
+# Option B) LAD（L1：中央値回帰）＝ scikit-learn QuantileRegressor(q=0.5)
+# ※scikit-learn>=1.0 が必要。無い場合は statsmodels の QuantReg を利用してください。
+def fit_meta_lad_sklearn(X_meta_train, y, X_meta_test, quantile: float = 0.5, alpha_l1: float = 1e-4):
+    from sklearn.linear_model import QuantileRegressor
+    meta = QuantileRegressor(quantile=quantile, alpha=alpha_l1, solver="highs")
+    meta.fit(X_meta_train, y)
+    return meta, meta.predict(X_meta_test)
+
+# Option C) Huber（外れ値ロバスト）
+def fit_meta_huber(X_meta_train, y, X_meta_test, epsilon: float = 1.35, alpha_reg: float = 0.0):
+    meta = HuberRegressor(epsilon=epsilon, alpha=alpha_reg)
+    meta.fit(X_meta_train, y)
+    return meta, meta.predict(X_meta_test)
+
+# ================================
+# 使い方（例）
+# ================================
+"""
+# 1) ベースモデルを用意
+base_models = {
+    "lgbm": LGBMRegressor(num_leaves=127, min_data_in_leaf=10, learning_rate=0.05, n_estimators=3000),
+    "ridge": Ridge(alpha=1.0),
+    "glm_tweedie": TweedieRegressor(power=1.4, alpha=0.0001, link="log"),  # 正の連続・重尾
+}
+if _HAS_CAT:
+    base_models["cat"] = CatBoostRegressor(depth=8, learning_rate=0.05, n_estimators=3000, loss_function="MAE")
+
+# 2) OOF生成（GroupKFoldを使いたい場合は groups を渡す）
+oof_res = make_oof_predictions(base_models, X_train, y_train, X_test, n_splits=5, groups=None)
+
+# 3) Blending（αは上側重視の分位）
+alpha_blend = 0.85
+w = optimize_blend_weights(y_train, oof_res.oof_matrix, alpha=alpha_blend)
+pred_blend_test = oof_res.test_matrix @ w
+
+# 4) Stacking（メタ学習器を選択：Quantile / LAD / Huber）
+# 4a) Quantile LGBM（推奨）
+meta_q, pred_stack_q = fit_meta_quantile_lgbm(oof_res.oof_matrix, y_train, oof_res.test_matrix, alpha=0.85)
+
+# 4b) LAD（中央値）— 上側をさらに見たい場合は quantile=0.7〜0.9 でもOK
+# meta_lad, pred_stack_lad = fit_meta_lad_sklearn(oof_res.oof_matrix, y_train, oof_res.test_matrix, quantile=0.8)
+
+# 4c) Huber
+# meta_huber, pred_stack_huber = fit_meta_huber(oof_res.oof_matrix, y_train, oof_res.test_matrix)
+
+# 5) 最終統合（Blending × Stacking の2重ブレンドを再最適化）
+#    2モデルの重み最適化（w0+w1=1, w>=0, 目的=Pinball）
+two_stack = np.vstack([pred_blend_test, pred_stack_q]).T  # shape=(n_test, 2)
+# ここでは学習側でも同様に OOF で pred_blend_oof と pred_stack_oof を作って重み最適化するのが正式
+# デモ用に、学習側の2列行列を簡略に作るなら：
+pred_blend_oof = (oof_res.oof_matrix @ w)
+meta_q.fit(oof_res.oof_matrix, y_train); pred_stack_oof = meta_q.predict(oof_res.oof_matrix)
+W2 = optimize_blend_weights(y_train, np.vstack([pred_blend_oof, pred_stack_oof]).T, alpha=0.85)
+final_pred = two_stack @ W2
+
+# （任意）評価例：MAE/Pinball
+# print("MAE(blend)=", mean_absolute_error(y_valid, pred_blend_valid))
+# print("Pinball(final, 0.85)=", pinball_loss(y_valid, final_pred, 0.85))
+"""
