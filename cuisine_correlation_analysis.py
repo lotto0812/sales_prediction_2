@@ -223,7 +223,15 @@ for cuisine in valid_cuisines:
                 cbar_kws={'shrink': 0.8},
                 annot_kws={'size': 8}
             )
-            plt.title(f'{cuisine} - 各ランクでのtarget_amount_tableauとの相関比較', fontsize=14, pad=20)
+            
+            # タイトルに各ランクのデータ数を追加
+            title_with_counts = f'{cuisine} - 各ランクでのtarget_amount_tableauとの相関比較\n'
+            for range_name in ranges:
+                df_range = cuisine_data[cuisine_data['amount_range'] == range_name]
+                count = len(df_range)
+                title_with_counts += f'{range_name}: {count:,}店舗  '
+            plt.title(title_with_counts, fontsize=14, pad=20)
+            
             plt.xlabel('変数')
             plt.ylabel('target_amount_tableauの範囲')
             plt.tick_params(axis='x', rotation=45)
