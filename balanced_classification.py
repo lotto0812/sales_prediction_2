@@ -12,7 +12,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 print("データを読み込み中...")
-df = pd.read_excel('aggregated_df.xlsx')
+df = pd.read_csv('aggregated_df_with_predictions.csv')
 
 # 分析用データの作成（20 < target_amount_tableau < 1000の範囲のみ）
 analysis_condition = (df['target_amount_tableau'] > 20) & (df['target_amount_tableau'] < 1000)
@@ -197,6 +197,12 @@ for i, (model_name, model_config) in enumerate(models.items(), 1):
     # 各モデルの詳細分類レポートを表示
     print(f"\n=== {model_name} の詳細分類レポート ===")
     print(classification_report(y_test, y_pred))
+    
+    # 分類レポートをCSVファイルに保存
+    class_report = classification_report(y_test, y_pred, output_dict=True)
+    report_df = pd.DataFrame(class_report).transpose()
+    report_df.to_csv(f'classification_report_{model_name.replace(" ", "_")}.csv')
+    print(f"分類レポートを保存: classification_report_{model_name.replace(' ', '_')}.csv")
     
     print(f"【{i}/{total_models}】{model_name} 完了")
 
