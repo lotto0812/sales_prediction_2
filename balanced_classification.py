@@ -226,3 +226,38 @@ for class_name in class_counts.index:
         print(f"{class_name}: F1={f1:.3f}, Precision={precision:.3f}, Recall={recall:.3f}")
 
 print(f"\n分析完了！")
+
+# 最良のモデルですべてのデータを分類
+print(f"\n=== 全データの分類実行 ===")
+print("最良のモデルですべてのデータを分類中...")
+
+# 全データの特徴量を準備
+X_all = df[features].fillna(df[features].median())
+best_model = results[best_model_name]['best_model']
+
+# 全データを分類
+y_pred_all = best_model.predict(X_all)
+
+# クラス名を英語に変換
+class_mapping = {
+    '20~50': 'low',
+    '50~120': 'middle', 
+    '120~': 'high'
+}
+
+pred_class = [class_mapping[class_name] for class_name in y_pred_all]
+
+# aggregated_dfの一番右にpred_class列を追加
+df['pred_class'] = pred_class
+
+print(f"分類完了！")
+print(f"全データ数: {len(df)}")
+print(f"pred_class分布:")
+pred_counts = df['pred_class'].value_counts()
+for class_name, count in pred_counts.items():
+    percentage = count / len(df) * 100
+    print(f"  {class_name}: {count:,}店舗 ({percentage:.1f}%)")
+
+# 結果をCSVファイルに保存
+df.to_csv('aggregated_df_with_predictions.csv', index=False)
+print(f"\n結果を保存: aggregated_df_with_predictions.csv")

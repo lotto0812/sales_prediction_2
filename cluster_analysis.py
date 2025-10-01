@@ -11,7 +11,7 @@ warnings.filterwarnings('ignore')
 
 # データの読み込み
 print("データを読み込み中...")
-df = pd.read_excel('aggregated_df.xlsx')
+df = pd.read_csv('aggregated_df_with_predictions.csv')
 
 print(f"元データ形状: {df.shape}")
 
@@ -55,26 +55,38 @@ print(df.isnull().sum())
 # 相関係数の計算
 print("\n=== 相関係数の計算 ===")
 # target_amount_tableauとの相関を計算（分析用データを使用）
-correlation_vars = ['target_amount_tableau', 'AVG_MONTHLY_POPULATION', 'NUM_SEATS']
+correlation_vars = ['target_amount_tableau', 'AVG_MONTHLY_POPULATION', 'NUM_SEATS', 'NEAREST_STATION_INFO_count', 'LUNCH_INFO']
 correlation_df = df_analysis[correlation_vars].corr()
 
 print("\ntarget_amount_tableauとの相関係数:")
 print(correlation_df['target_amount_tableau'].sort_values(ascending=False))
 
 # 散布図で可視化
-fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+fig, axes = plt.subplots(2, 2, figsize=(15, 12))
 
 # 人流 vs target_amount_tableau
-axes[0].scatter(df_analysis['AVG_MONTHLY_POPULATION'], df_analysis['target_amount_tableau'], alpha=0.5)
-axes[0].set_xlabel('AVG_MONTHLY_POPULATION (人流)')
-axes[0].set_ylabel('target_amount_tableau')
-axes[0].set_title(f'人流 vs target_amount_tableau\n相関係数: {correlation_df.loc["AVG_MONTHLY_POPULATION", "target_amount_tableau"]:.3f}')
+axes[0,0].scatter(df_analysis['AVG_MONTHLY_POPULATION'], df_analysis['target_amount_tableau'], alpha=0.5)
+axes[0,0].set_xlabel('AVG_MONTHLY_POPULATION (人流)')
+axes[0,0].set_ylabel('target_amount_tableau')
+axes[0,0].set_title(f'人流 vs target_amount_tableau\n相関係数: {correlation_df.loc["AVG_MONTHLY_POPULATION", "target_amount_tableau"]:.3f}')
 
 # 席数 vs target_amount_tableau
-axes[1].scatter(df_analysis['NUM_SEATS'], df_analysis['target_amount_tableau'], alpha=0.5)
-axes[1].set_xlabel('NUM_SEATS (席数)')
-axes[1].set_ylabel('target_amount_tableau')
-axes[1].set_title(f'席数 vs target_amount_tableau\n相関係数: {correlation_df.loc["NUM_SEATS", "target_amount_tableau"]:.3f}')
+axes[0,1].scatter(df_analysis['NUM_SEATS'], df_analysis['target_amount_tableau'], alpha=0.5)
+axes[0,1].set_xlabel('NUM_SEATS (席数)')
+axes[0,1].set_ylabel('target_amount_tableau')
+axes[0,1].set_title(f'席数 vs target_amount_tableau\n相関係数: {correlation_df.loc["NUM_SEATS", "target_amount_tableau"]:.3f}')
+
+# 最寄り駅数 vs target_amount_tableau
+axes[1,0].scatter(df_analysis['NEAREST_STATION_INFO_count'], df_analysis['target_amount_tableau'], alpha=0.5)
+axes[1,0].set_xlabel('NEAREST_STATION_INFO_count (最寄り駅数)')
+axes[1,0].set_ylabel('target_amount_tableau')
+axes[1,0].set_title(f'最寄り駅数 vs target_amount_tableau\n相関係数: {correlation_df.loc["NEAREST_STATION_INFO_count", "target_amount_tableau"]:.3f}')
+
+# ランチ情報 vs target_amount_tableau
+axes[1,1].scatter(df_analysis['LUNCH_INFO'], df_analysis['target_amount_tableau'], alpha=0.5)
+axes[1,1].set_xlabel('LUNCH_INFO (ランチ情報)')
+axes[1,1].set_ylabel('target_amount_tableau')
+axes[1,1].set_title(f'ランチ情報 vs target_amount_tableau\n相関係数: {correlation_df.loc["LUNCH_INFO", "target_amount_tableau"]:.3f}')
 
 plt.tight_layout()
 plt.savefig('correlation_analysis.png', dpi=300, bbox_inches='tight')
@@ -82,12 +94,14 @@ plt.show()
 
 print(f"\n人流(AVG_MONTHLY_POPULATION)とtarget_amount_tableauの相関係数: {correlation_df.loc['AVG_MONTHLY_POPULATION', 'target_amount_tableau']:.3f}")
 print(f"席数(NUM_SEATS)とtarget_amount_tableauの相関係数: {correlation_df.loc['NUM_SEATS', 'target_amount_tableau']:.3f}")
+print(f"最寄り駅数(NEAREST_STATION_INFO_count)とtarget_amount_tableauの相関係数: {correlation_df.loc['NEAREST_STATION_INFO_count', 'target_amount_tableau']:.3f}")
+print(f"ランチ情報(LUNCH_INFO)とtarget_amount_tableauの相関係数: {correlation_df.loc['LUNCH_INFO', 'target_amount_tableau']:.3f}")
 
 # クラスタリングの実装
 print("\n=== クラスタリングの実装 ===")
 
 # クラスタリング用の特徴量を準備（分析用データを使用）
-clustering_features = ['AVG_MONTHLY_POPULATION', 'NUM_SEATS']
+clustering_features = ['AVG_MONTHLY_POPULATION', 'NUM_SEATS', 'NEAREST_STATION_INFO_count', 'LUNCH_INFO']
 X = df_analysis[clustering_features].copy()
 
 # 欠損値の確認
