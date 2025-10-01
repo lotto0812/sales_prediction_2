@@ -150,7 +150,8 @@ for i, range_name in enumerate(ranges):
 
 plt.tight_layout()
 plt.savefig('correlation_heatmap_by_range.png', dpi=300, bbox_inches='tight')
-plt.show()
+plt.close()  # メモリ節約のため
+# plt.show()  # コメントアウト
 
 # 全体の相関ヒートマップも作成
 print("\n=== 全体の相関ヒートマップ ===")
@@ -179,7 +180,8 @@ for label in ax.get_xticklabels():
     label.set_ha('right')
 plt.tight_layout()
 plt.savefig('correlation_heatmap_overall.png', dpi=300, bbox_inches='tight')
-plt.show()
+plt.close()  # メモリ節約のため
+# plt.show()  # コメントアウト
 
 # 各範囲でのtarget_amount_tableauとの相関を比較
 print("\n=== 各範囲でのtarget_amount_tableauとの相関比較 ===")
@@ -232,7 +234,15 @@ sns.heatmap(
     cbar_kws={'shrink': 0.8},
     annot_kws={'size': 8}  # 相関比較ヒートマップのアノテーションサイズ
 )
-plt.title('各範囲でのtarget_amount_tableauとの相関比較', fontsize=16, pad=20)
+
+# タイトルに各ランクのデータ数を追加
+title_with_counts = '各範囲でのtarget_amount_tableauとの相関比較\n'
+for range_name in ranges:
+    df_range = df_with_ranges[df_with_ranges['amount_range'] == range_name]
+    count = len(df_range)
+    title_with_counts += f'{range_name}: {count:,}店舗  '
+plt.title(title_with_counts, fontsize=16, pad=20)
+
 plt.xlabel('変数')
 plt.ylabel('target_amount_tableauの範囲')
 plt.tick_params(axis='x', rotation=45)
@@ -243,7 +253,8 @@ for label in ax.get_xticklabels():
     label.set_ha('right')
 plt.tight_layout()
 plt.savefig('correlation_comparison_by_range.png', dpi=300, bbox_inches='tight')
-plt.show()
+plt.close()  # メモリ節約のため
+# plt.show()  # コメントアウト
 
 print(f"\n分析完了！結果は以下のファイルに保存されました：")
 print(f"- correlation_heatmap_by_range.png: 範囲別相関ヒートマップ")
