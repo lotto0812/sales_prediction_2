@@ -236,10 +236,25 @@ def calculate_percentile_stats(series):
         'max': series.max()
     }
 
-# 各クラスタの統計情報を計算（範囲別）
+# 各クラスタの中央値を計算してソート順を決定
+cluster_medians = df_analysis.groupby('cluster')['target_amount_tableau'].median().sort_values()
+print(f"\n各クラスタの中央値（ソート順）:")
+for cluster_id, median_val in cluster_medians.items():
+    print(f"  クラスタ {cluster_id}: 中央値 = {median_val:.2f}")
+
+# 中央値が小さい順に新しいクラスタ番号を割り当て
+median_rank = {original_id: new_id for new_id, original_id in enumerate(cluster_medians.index)}
+print(f"\n新しいクラスタ番号の割り当て:")
+for original_id, new_id in median_rank.items():
+    print(f"  元クラスタ {original_id} → 新クラスタ {new_id}")
+
+# 新しいクラスタ番号をデータフレームに追加
+df_analysis['cluster_renumbered'] = df_analysis['cluster'].map(median_rank)
+
+# 各クラスタの統計情報を計算（範囲別）- 新しい番号順で
 cluster_range_stats = {}
-for cluster_id in sorted(df_analysis['cluster'].unique()):
-    cluster_data = df_analysis[df_analysis['cluster'] == cluster_id]
+for cluster_id in sorted(df_analysis['cluster_renumbered'].unique()):
+    cluster_data = df_analysis[df_analysis['cluster_renumbered'] == cluster_id]
     cluster_range_stats[cluster_id] = {}
     
     # 各範囲での統計を計算
@@ -248,10 +263,12 @@ for cluster_id in sorted(df_analysis['cluster'].unique()):
         if len(range_data) > 0:
             cluster_range_stats[cluster_id][range_name] = calculate_percentile_stats(range_data)
 
-# 結果を整理して表示
-print("\n各クラスタ・範囲別のtarget_amount_tableau統計情報:")
+# 結果を整理して表示（新しい番号順）
+print("\n各クラスタ・範囲別のtarget_amount_tableau統計情報（中央値順）:")
 for cluster_id in sorted(cluster_range_stats.keys()):
-    print(f"\n【クラスタ {cluster_id}】")
+    cluster_data = df_analysis[df_analysis['cluster_renumbered'] == cluster_id]
+    median_val = cluster_data['target_amount_tableau'].median()
+    print(f"\n【クラスタ {int(cluster_id)}】（中央値: {median_val:.2f}）")
     for range_name in sorted(cluster_range_stats[cluster_id].keys()):
         stats = cluster_range_stats[cluster_id][range_name]
         print(f"  {range_name}: データ数={stats['データ数']:,}, 平均={stats['平均']:.2f}, 中央値={stats['中央値']:.2f}")
@@ -266,12 +283,12 @@ for range_name in sorted(df['amount_range'].unique()):
         stats = overall_range_stats[range_name]
         print(f"{range_name}: データ数={stats['データ数']:,}, 平均={stats['平均']:.2f}, 中央値={stats['中央値']:.2f}")
 
-# 統計情報をCSVファイルに保存
-# クラスタ別統計
+# 統計情報をCSVファイルに保存（新しい番号順）
+# クラスタ別統計（新しい番号順）
 cluster_stats_df = pd.DataFrame()
-for cluster_id in sorted(df_analysis['cluster'].unique()):
-    cluster_data = df_analysis[df_analysis['cluster'] == cluster_id]['target_amount_tableau']
-    cluster_stats_df[f'クラスタ_{cluster_id}'] = calculate_percentile_stats(cluster_data)
+for cluster_id in sorted(df_analysis['cluster_renumbered'].unique()):
+    cluster_data = df_analysis[df_analysis['cluster_renumbered'] == cluster_id]['target_amount_tableau']
+    cluster_stats_df[f'クラスタ_{int(cluster_id)}'] = calculate_percentile_stats(cluster_data)
 
 cluster_stats_df.to_csv(os.path.join(results_folder, 'cluster_target_amount_stats.csv'), encoding='utf-8-sig')
 print(f"\nクラスタ統計情報を '{results_folder}/cluster_target_amount_stats.csv' に保存しました。")
@@ -280,6 +297,19 @@ print(f"\nクラスタ統計情報を '{results_folder}/cluster_target_amount_st
 range_stats_df = pd.DataFrame(overall_range_stats).T
 range_stats_df.to_csv(os.path.join(results_folder, 'range_target_amount_stats.csv'), encoding='utf-8-sig')
 print(f"範囲別統計情報を '{results_folder}/range_target_amount_stats.csv' に保存しました。")
+
+# クラスタ番号変更マッピングを保存
+mapping_df = pd.DataFrame({
+    '元クラスタ番号': list(median_rank.keys()),
+    '新クラスタ番号': list(median_rank.values()),
+    '中央値': [df_analysis[df_analysis['cluster'] == orig_id]['target_amount_tableau'].median() 
+               for orig_id in median_rank.keys()],
+    'データ数': [len(df_analysis[df_analysis['cluster'] == orig_id]) 
+                for orig_id in median_rank.keys()]
+}).sort_values('新クラスタ番号')
+
+mapping_df.to_csv(os.path.join(results_folder, 'cluster_renumbering_mapping.csv'), index=False, encoding='utf-8-sig')
+print(f"クラスタ番号変更マッピングを '{results_folder}/cluster_renumbering_mapping.csv' に保存しました。")
 
 # 各クラスタの分布を可視化（範囲別）
 fig, axes = plt.subplots(2, 2, figsize=(15, 12))
@@ -300,66 +330,70 @@ axes[0,1].set_xlabel('target_amount_tableau')
 axes[0,1].set_ylabel('頻度')
 axes[0,1].legend()
 
-# 3. クラスタ別の散布図（人流 vs target_amount_tableau）
-for cluster_id in sorted(df_analysis['cluster'].unique()):
-    cluster_data = df_analysis[df_analysis['cluster'] == cluster_id]
+# 3. クラスタ別の散布図（人流 vs target_amount_tableau）- 中央値順
+colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan']
+for i, cluster_id in enumerate(sorted(df_analysis['cluster_renumbered'].unique())):
+    cluster_data = df_analysis[df_analysis['cluster_renumbered'] == cluster_id]
+    median_val = cluster_data['target_amount_tableau'].median()
     axes[1,0].scatter(cluster_data['AVG_MONTHLY_POPULATION'], 
                      cluster_data['target_amount_tableau'], 
-                     alpha=0.1, label=f'クラスタ {cluster_id}')
+                     alpha=0.1, color=colors[i], label=f'クラスタ {int(cluster_id)} (中央値:{median_val:.1f})')
 axes[1,0].set_xlabel('AVG_MONTHLY_POPULATION (人流)')
 axes[1,0].set_ylabel('target_amount_tableau')
-axes[1,0].set_title('人流 vs target_amount_tableau（クラスタ別）')
+axes[1,0].set_title('人流 vs target_amount_tableau（クラスタ別・中央値順）')
 axes[1,0].legend()
 
-# 4. クラスタ別の散布図（席数 vs target_amount_tableau）
-for cluster_id in sorted(df_analysis['cluster'].unique()):
-    cluster_data = df_analysis[df_analysis['cluster'] == cluster_id]
+# 4. クラスタ別の散布図（席数 vs target_amount_tableau）- 中央値順
+for i, cluster_id in enumerate(sorted(df_analysis['cluster_renumbered'].unique())):
+    cluster_data = df_analysis[df_analysis['cluster_renumbered'] == cluster_id]
+    median_val = cluster_data['target_amount_tableau'].median()
     axes[1,1].scatter(cluster_data['NUM_SEATS'], 
                      cluster_data['target_amount_tableau'], 
-                     alpha=0.1, label=f'クラスタ {cluster_id}')
+                     alpha=0.1, color=colors[i], label=f'クラスタ {int(cluster_id)} (中央値:{median_val:.1f})')
 axes[1,1].set_xlabel('NUM_SEATS (席数)')
 axes[1,1].set_ylabel('target_amount_tableau')
-axes[1,1].set_title('席数 vs target_amount_tableau（クラスタ別）')
+axes[1,1].set_title('席数 vs target_amount_tableau（クラスタ別・中央値順）')
 axes[1,1].legend()
 
 plt.tight_layout()
 plt.savefig(os.path.join(results_folder, 'cluster_target_amount_analysis.png'), dpi=300, bbox_inches='tight')
 plt.close()
 
-# 範囲別のクラスタ分布を可視化
+# 範囲別のクラスタ分布を可視化（中央値順）
 fig, ax = plt.subplots(figsize=(12, 8))
-cluster_range_counts = df_analysis.groupby(['amount_range', 'cluster']).size().unstack(fill_value=0)
+cluster_range_counts = df_analysis.groupby(['amount_range', 'cluster_renumbered']).size().unstack(fill_value=0)
 cluster_range_counts.plot(kind='bar', ax=ax, stacked=True)
-ax.set_title('各範囲でのクラスタ分布')
+ax.set_title('各範囲でのクラスタ分布（中央値順）')
 ax.set_xlabel('target_amount_tableauの範囲')
 ax.set_ylabel('店舗数')
-ax.legend(title='クラスタ', bbox_to_anchor=(1.05, 1), loc='upper left')
+ax.legend(title='クラスタ（中央値順）', bbox_to_anchor=(1.05, 1), loc='upper left')
 plt.xticks(rotation=45)
 plt.tight_layout()
 plt.savefig(os.path.join(results_folder, 'cluster_distribution_by_range.png'), dpi=300, bbox_inches='tight')
 plt.close()
 
-# クラスタ毎のtarget_amount_tableauのヒストグラム
-print("\n=== クラスタ毎のtarget_amount_tableauヒストグラム作成中 ===")
+# クラスタ毎のtarget_amount_tableauのヒストグラム（中央値順）
+print("\n=== クラスタ毎のtarget_amount_tableauヒストグラム作成中（中央値順） ===")
 plt.figure(figsize=(15, 10))
 
-# 各クラスタのヒストグラムを重ね合わせて表示
+# 各クラスタのヒストグラムを重ね合わせて表示（中央値順）
 colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan']
-for i, cluster_id in enumerate(sorted(df_analysis['cluster'].unique())):
-    cluster_data = df_analysis[df_analysis['cluster'] == cluster_id]['target_amount_tableau']
+for i, cluster_id in enumerate(sorted(df_analysis['cluster_renumbered'].unique())):
+    cluster_data = df_analysis[df_analysis['cluster_renumbered'] == cluster_id]['target_amount_tableau']
+    median_val = cluster_data.median()
     plt.hist(cluster_data, bins=50, alpha=0.1, color=colors[i], 
-             label=f'クラスタ {cluster_id} (n={len(cluster_data):,})', density=True)
+             label=f'クラスタ {int(cluster_id)} (n={len(cluster_data):,}, 中央値={median_val:.1f})', density=True)
 
 plt.xlabel('target_amount_tableau')
 plt.ylabel('密度')
-plt.title('クラスタ毎のtarget_amount_tableau分布（ヒストグラム）\nα=0.1で重ね合わせ表示')
+plt.title('クラスタ毎のtarget_amount_tableau分布（ヒストグラム・中央値順）\nα=0.1で重ね合わせ表示')
 plt.legend()
 plt.grid(True, alpha=0.3)
 plt.savefig(os.path.join(results_folder, 'cluster_histogram_overlay.png'), dpi=300, bbox_inches='tight')
 plt.close()
 
-# 各クラスタを個別のサブプロットで表示
-n_clusters = len(df_analysis['cluster'].unique())
+# 各クラスタを個別のサブプロットで表示（中央値順）
+n_clusters = len(df_analysis['cluster_renumbered'].unique())
 n_cols = 3
 n_rows = (n_clusters + n_cols - 1) // n_cols
 fig, axes = plt.subplots(n_rows, n_cols, figsize=(18, 6*n_rows))
@@ -367,13 +401,14 @@ if n_rows == 1:
     axes = axes.reshape(1, -1)
 axes = axes.flatten()
 
-for i, cluster_id in enumerate(sorted(df_analysis['cluster'].unique())):
-    cluster_data = df_analysis[df_analysis['cluster'] == cluster_id]['target_amount_tableau']
+for i, cluster_id in enumerate(sorted(df_analysis['cluster_renumbered'].unique())):
+    cluster_data = df_analysis[df_analysis['cluster_renumbered'] == cluster_id]['target_amount_tableau']
+    median_val = cluster_data.median()
     
     axes[i].hist(cluster_data, bins=30, alpha=0.1, color=colors[i], edgecolor='black')
     axes[i].set_xlabel('target_amount_tableau')
     axes[i].set_ylabel('頻度')
-    axes[i].set_title(f'クラスタ {cluster_id}\n(n={len(cluster_data):,}, 平均={cluster_data.mean():.1f})')
+    axes[i].set_title(f'クラスタ {int(cluster_id)}\n(n={len(cluster_data):,}, 中央値={median_val:.1f})')
     axes[i].grid(True, alpha=0.3)
 
 # 余分なサブプロットは非表示
@@ -384,11 +419,12 @@ plt.tight_layout()
 plt.savefig(os.path.join(results_folder, 'cluster_histogram_individual.png'), dpi=300, bbox_inches='tight')
 plt.close()
 
-# クラスタの特徴をまとめる
-print("\n=== 各クラスタの特徴まとめ ===")
-for cluster_id in sorted(df_analysis['cluster'].unique()):
-    cluster_data = df_analysis[df_analysis['cluster'] == cluster_id]
-    print(f"\n【クラスタ {cluster_id}】")
+# クラスタの特徴をまとめる（中央値順）
+print("\n=== 各クラスタの特徴まとめ（中央値順） ===")
+for cluster_id in sorted(df_analysis['cluster_renumbered'].unique()):
+    cluster_data = df_analysis[df_analysis['cluster_renumbered'] == cluster_id]
+    median_val = cluster_data['target_amount_tableau'].median()
+    print(f"\n【クラスタ {int(cluster_id)}】（中央値: {median_val:.2f}）")
     print(f"  データ数: {len(cluster_data):,}店舗")
     print(f"  人流の平均: {cluster_data['AVG_MONTHLY_POPULATION'].mean():.0f}")
     print(f"  席数の平均: {cluster_data['NUM_SEATS'].mean():.0f}")
